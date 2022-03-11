@@ -1,0 +1,610 @@
+---
+title: "DE of IF Patients in TARGET AML"
+author: "Jenny Smith"
+date: "April 26, 2017"
+output: pdf_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(survival)
+library(RColorBrewer)
+library(colorspace)
+library(stringr)
+library(dplyr)
+library(magrittr)
+library(tables)
+library(gtools)
+library(VennDiagram)
+getwd()
+```
+
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Limma_DE_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/DESEq2_DE_Function.r")
+```
+
+
+#Define Functions to be used
+```{r}
+phenoVectors <- function(groupA, groupB){
+  library(magrittr)
+  #groupA and GroupB are character vectors with the patients IDs in each group
+  g1 <- as.character(substitute(groupA))
+  g2 <- as.character(substitute(groupB)) 
+  
+  vector <- c(rep(g1, length(groupA)), rep(g2, length(groupB)))
+  names(vector) <- c(groupA, groupB)
+  
+  return(vector)
+}
+```
+
+```{r}
+subsetGroups <- function(expnData, clinData){
+  IF <- rownames(clinData[which(clinData$Group == "A"), ]) %>% intersect(., colnames(expnData))
+  CR <- rownames(clinData[which(clinData$Induction.Status == "Remission" & clinData$First.Event == "Censored"), ]) %>% intersect(., colnames(expnData))
+  relapse <- rownames(clinData[which(clinData$Group == "C"), ]) %>% intersect(., colnames(expnData))
+  
+  statusCR <- phenoVectors(IF, CR)
+  statusRx <- phenoVectors(IF, relapse)
+  
+  list <- list(statusCR, statusRx)
+  names(list) <- c("CR", "Relapse")
+  
+  return(list)
+}
+```
+
+```{r}
+clusterExploration <- function(geneList,PhenoVector,methods) {
+  tmp <- list()
+  for (j in 1:length(methods)){
+    d1 <- dge_dendrograms(counts$LD, PhenoVector, geneList,methods[j])
+    d2 <- dge_dends_scale(counts$LD, PhenoVector, geneList,methods[j])
+    d3 <- dge_dendrograms(counts$batchCorrected, PhenoVector, geneList, methods[j])
+    d4 <- dge_dends_scale(counts$batchCorrected, PhenoVector, geneList,methods[j])
+    
+    compMethods <- list(d1,d2,d3,d4)
+    names(compMethods) <- c("LD_cts", "LD_cts_scl", "LD_btc", "LD_btc_scl")
+    
+    tmp[[methods[j]]] <- compMethods
+  }
+  return(tmp)
+}
+  
+```
+
+```{r }
+customDends <- function(c1_list,phenos,linkage){
+  for (i in 1:length(c1_list)){
+    cc <- c(IF="red", CR="blue")
+    
+    method <- names(c1_list)[i]
+    N <- nrow(c1_list[[i]]$TMMCPM)
+  
+    Title <- paste(linkage, method,"for", N, "DEGs", sep = " ")
+    print(Title)
+    
+    colorDends(c1_list[[i]]$c1,cc,phenos,c(0.4,1.5) )
+    par(cex = 1.15, cex.lab=0.9, cex.main=1.25)
+    title(xlab="Patient Sample", ylab="Euclidean Distance",
+      main=Title, line = 4.0)
+  } 
+}
+```
+
+```{r}
+expnDist <- function(expnMatrix,phenoVector, geneList,BM=FALSE,logCPM=NULL){
+  #expnMatrix is a dataframe with genes are rownames, patient IDs as col names
+  #phenoVector is character vector with group membership (eg pos, neg) with patient IDs as names
+  #genelist is a character vector
+  #BM is for whether to include BM samples into phenovector
+  #logCPM is whether to log2 CPM normalize the expn data
+  
+  library(ggplot2)
+  library(plyr)
+  
+  if(BM == TRUE){
+    BM <- rep("BM", length(grep("^BM", colnames(expnMatrix)))) %>% setNames(grep("^BM", colnames(expnMatrix), value = TRUE))
+    phenoVector <- c(phenoVector, BM)
+  }else if (BM==FALSE){
+    phenoVector = phenoVector
+  }
+
+  expnMatrix <- expnMatrix[rownames(expnMatrix) %in% geneList, ] #subset for genes of interest
+  expnMatrix <- expnMatrix[, intersect(names(phenoVector), colnames(expnMatrix))] #match the column names 
+  
+  if (is.null(logCPM)){
+    expnMatrix = expnMatrix
+  } else if (logCPM==TRUE){
+    expnMatrix <- cpm(expnMatrix, log=TRUE, prior.count = 1)  #convert to log2 CPM
+    x <- "Log2 Counts per Million (CPM)"
+    y <- "Log2 Counts per Million (CPM)"
+  } else if (logCPM == FALSE){
+    expnMatrix <- apply(expnMatrix, 2, function(x) log2(x + 1))
+    x <- "Log2 Read Counts"
+    y <- "Log2 Read Counts"
+  }
+  
+  tmp <- data.frame(t(expnMatrix),
+                    Status=phenoVector) 
+  
+  for (i in 1:nrow(expnMatrix)){
+    gene <- rownames(expnMatrix)[i]
+    means <- as.data.frame(tapply(tmp[,i], INDEX = tmp$Status, FUN=mean)) %>% cbind(., Status=rownames(.))
+    
+    dtitle <- paste("Density  Plot of ", gene, "Expression in TARGET AML")
+    btitle <- paste("Distribution of ", gene, "Expression in TARGET AML")
+    
+    densityPlot <- ggplot(tmp, aes(x=tmp[,i], fill=Status)) +
+      geom_histogram(aes(y=..density..), alpha=0.65, position="identity") +
+      geom_density(alpha=0.5) +
+      labs(title=dtitle, y="Density", x=x) +
+      geom_vline(data=means, aes(xintercept = means[,1], color=Status),linetype="dashed") +
+      theme_bw()
+
+    boxPlot <- ggplot(tmp, aes(x=Status, y=tmp[,i], fill=Status)) +
+      geom_boxplot() +
+      labs(title=btitle, x=" ", y=y) +
+      theme_bw()
+    
+    print(densityPlot)
+    print(boxPlot)
+    }
+}
+```
+
+
+#high Depth diagnostic Samples
+```{r}
+#note:filtered for rowsums() > 10 counts. So basically removed genes with all zeros 
+# HD_counts <- get(load("~/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/ExpressionData/TARGET_AML_rawCounts_Dx_FilteredLowCounts_withGeneSymbol_Aug2014.RData"))
+HD_counts <- get(load("ExpressionData/TARGET_AML_rawCounts_Dx_FilteredLowCounts_withGeneSymbol_Aug2014.RData"))
+
+dim(HD_counts)
+```
+
+```{r}
+head(HD_counts[,1:5])
+```
+
+#Low Depth raw counts
+
+```{r}
+# LD_counts <- get(load("~/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/ExpressionData/TARGET_AML_FractionalCounts_BCCA28Apr2016.RData"))
+LD_counts <- get(load("ExpressionData/TARGET_AML_FractionalCounts_BCCA28Apr2016.RData"))
+LD_counts <- LD_counts[which(!duplicated(LD_counts$geneSymbol)), ]
+rownames(LD_counts) <- LD_counts$geneSymbol
+LD_counts <- LD_counts[,-1]
+dim(LD_counts)
+```
+
+```{r}
+head(LD_counts[,1:5])
+```
+
+```{r}
+# save(LD_counts, file="TARGET_AML_FractionalCounts_genesAsRownames_BCCA28Apr2016.RData")
+```
+
+
+#low Depth batch corrected
+```{r}
+# LD_batch <- get(load("~/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/ExpressionData/combatAdjustedExp.RData"))
+LD_batch <- get(load("ExpressionData/combatAdjustedExp.RData"))
+LD_batch[which(LD_batch < 0, arr.ind=TRUE)] <- 0
+
+dim(LD_batch)
+```
+
+```{r}
+head(LD_batch[,1:5])
+```
+
+
+#Read in the Clinical Data
+```{r}
+clinData <- read.csv("TARGET_AML_ClinicalData_current_asof_June30_2016_Progression_Free_Survival_Updated.csv", stringsAsFactors = FALSE)
+
+rownames(clinData) <- clinData$TARGET.USI
+
+head(clinData[,1:5])
+```
+
+
+#Define the Groups 
+```{r}
+counts <- list(HD_counts, LD_counts, LD_batch)
+names(counts) <- c("HD", "LD", "batchCorrected")
+```
+
+```{r}
+#Extract the patient IDs that have RNA-seq data
+subsetCounts <- lapply(counts, subsetGroups, clinData=clinData)
+
+summary(subsetCounts) 
+```
+
+```{r}
+sapply(subsetCounts, function(x) sapply(x, table))
+```
+
+These poorly formatted numbers indicate that there are 3 IFs, 42 CRs, and 85 relapses in the HD cohort.
+There are 40 IFs, 171 controls, and 81 relapses in LD cohort. 
+
+
+##Read in the already formated RData
+
+```{r}
+counts <- get(load("~/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/RNAseq_Counts_HD_LD_batchCorrected.RData"))
+
+subsetCounts <- get(load("~/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/PatientGroups_HD_LD_batchCorrected.RData"))
+```
+
+
+#Perform Differential Expression Analysis using Limma package
+
+```{r message=FALSE,warning=FALSE}
+# DEGs <- list()
+for (i in 1:3){
+    for (j in 1:2){
+      ObjName <- paste(names(counts)[i], "IF_vs", names(subsetCounts[[i]][j]), sep="_")
+      print(ObjName)
+      
+      common <- names(subsetCounts[[i]][[j]])
+      groups <- unique(subsetCounts[[i]][[j]])
+      
+      g1 <- names(which(subsetCounts[[i]][[j]] == groups[1]))
+      g2 <- names(which(subsetCounts[[i]][[j]] == groups[2]))
+      
+      if (names(counts)[i] != "batchCorrected"){
+        DE <- calcDE(counts[[i]][,common], g1, g2, logCPM = TRUE)
+        print(paste("There are", nrow(DE$DE), "differentially expressed genes.", sep=" "))
+      }else if (names(counts)[i] == "batchCorrected"){ #no CPM on batch corrected reads. 
+        DE <- calcDE(counts[[i]][,common], g1, g2, logCPM = FALSE)
+        print(paste("There are", nrow(DE$DE), "differentially expressed genes.", sep=" "))
+      }
+      assign(ObjName, DE)
+      
+      
+      fileName <- paste("TARGET_AML_",ObjName,".csv", sep="")
+      # write.csv(DE$DE, fileName)
+    }
+}
+```
+
+```{r}
+dim(HD_IF_vs_CR$dge) #double check that it wasnt an error in subsetting the dataframe
+```
+
+There are no differentially expressed genes IDed in the HD cohort, though 16,395 genes have an expression value of more than 1 CPM per row. These are the genes which are input into the DE analysis. 
+
+
+#Differential Expression Analysis using DESeq2
+
+```{r message=FALSE,warning=FALSE}
+ObjNames <- NULL
+for (i in 1:3){
+  for ( j in 1:2){
+    ObjName <- paste(names(counts)[i], "IF_vs", names(subsetCounts[[i]][j]),"DESeq2", sep="_")
+    ObjNames <- c(ObjNames, ObjName)
+    print(ObjName)
+    
+
+    common <- names(subsetCounts[[i]][[j]])
+    groups <- subsetCounts[[i]][[j]]
+    ref <- grep("IF", unique(subsetCounts[[i]][[j]]), value = TRUE, invert = TRUE)
+
+    DE <- DEGs_DESeq(counts[[i]][,common], groups, ref)
+    print(paste("There are", nrow(DE$Filt_Res), "differentially expressed genes.", sep=" "))
+
+    assign(ObjName, DE)
+
+    fileName <- paste("TARGET_AML_", ObjName, "local_09May2017.csv", sep="")
+    rdata <- paste("TARGET_AML_", ObjName, "local_09May2017.RData", sep="")
+
+    # write.csv(DE$Filt_Res, fileName)
+    # save(DE,file=rdata)
+  }
+}
+```
+
+Note: a strange property of DESeq2 is that it will find more DEGs given more CPUs. It found 1112 for LD fractional counts on the local machine(8GB RAM), but found 1628 for same input, same code above run on Rhino. This is slightly concerning but I will just run on rhino. I decided the 1628 was better because it had ~40% in common DEGs with the batch corrected, versus about 30% for 1112. 
+
+Will perform cluster analysis to determine if it has an improvement in the clustering, though the IF RNA-seq is very noisy. 
+
+
+##load the DEGs 
+```{r}
+deseq <- dir(path="DESeq2/", pattern = ".RData" )
+ObjNames <- gsub("TARGET_AML_(.+DESeq2)rhino.+", "\\1", deseq) 
+# ObjNames
+
+for (i in 1:6){
+  dat <- paste("DESeq2/", deseq[i], sep="")
+  obj <- get(load(dat))
+  assign(ObjNames[i], obj)
+}
+```
+
+
+
+#Compare the Methods
+
+
+```{r}
+venn.diagram(list(Limma=rownames(batchCorrected_IF_vs_CR$DE), DESeq2=rownames(batchCorrected_IF_vs_CR_DESeq2$Filt_Res)),
+             filename="Limma_DESEq2_IFvsCR_batchCorrected_DEGs.tiff",
+             print.mode = c("raw","percent"),
+             main="DEGs IF vs CR for Limma and DESeq2: Batch Corrected Counts")
+```
+
+
+```{r}
+venn.diagram(list(FracCounts=rownames(LD_IF_vs_CR$DE), Batch=rownames(batchCorrected_IF_vs_CR$DE)), 
+             filename="Limma_IFvsCR_DEGs.tiff", imagetype = "tiff",print.mode = c("raw","percent"),
+             main="DEGs IF Vs CR for Fractional Counts and Batch Corrected Counts")
+```
+
+
+```{r}
+venn.diagram(list(limma=rownames(LD_IF_vs_CR$DE),deseq2=rownames(LD_IF_vs_CR_DESeq2$Filt_Res)), 
+             filename="Limma_DESeq2_Local_IFvsCR_DEGs.tiff", imagetype = "tiff",print.mode = c("raw","percent"),
+             main="DEGs IF Vs CR for Limma and DESeq2: Fractional Counts")
+```
+
+
+#Clinical Data Tables
+
+```{r}
+CDE <- read.table("~/reference_mapping-files/allCDEsTARGET_from_Hamid_2017.04.03.txt", 
+                  stringsAsFactors = FALSE,
+                  header = TRUE,
+                  row.names = 1,
+                  sep="\t")
+
+head(CDE)
+```
+
+
+
+
+#Define Groups for the Cluster Analysis using Limma Trend DEGs
+
+##Smaller gene list with greater than 4 fold-change or low adj.p values
+```{r}
+LD_IF_vs_CR[["DE_high"]] <- LD_IF_vs_CR$DE[abs(LD_IF_vs_CR$DE$logFC) > 3, ]
+LD_IF_vs_CR[["DE_lowP"]] <- LD_IF_vs_CR$DE[LD_IF_vs_CR$DE$adj.P.Val < 1e-04, ]
+
+
+dim(LD_IF_vs_CR$DE_high)
+dim(LD_IF_vs_CR$DE_lowP) 
+```
+
+```{r}
+batchCorrected_IF_vs_CR[["DE_high"]] <- batchCorrected_IF_vs_CR$DE[abs(batchCorrected_IF_vs_CR$DE$logFC) > 3, ]
+
+batchCorrected_IF_vs_CR[["DE_lowP"]] <- batchCorrected_IF_vs_CR$DE[batchCorrected_IF_vs_CR$DE$adj.P.Val < 1e-03, ]
+
+dim(batchCorrected_IF_vs_CR$DE_high)
+dim(batchCorrected_IF_vs_CR$DE_lowP)
+```
+
+
+#Determine the Distribution of the high FC or high P-value genes
+
+#List of DEGs to Analyze
+```{r}
+DEGs <- lapply(LD_IF_vs_CR[4:5], function(x) rownames(x))
+DEGs <- append(DEGs, lapply(batchCorrected_IF_vs_CR[4:5], function(x) rownames(x)))
+length(DEGs)
+```
+
+#Examine the Distribution of the Expression Levels
+```{r}
+for ( i in 1:length(DEGs)){
+  DEGLists <- c("7Genes", "120Genes", "11Genes", "138Genes")
+  name1 <- paste("boxplots_densityPlots_DEGs_BM",DEGLists[i],"log2CPM_rawCounts.pdf", sep="_")
+  name2 <- paste("boxplots_densityPlots_DEGs_BM",DEGLists[i],"log2Counts_batchCorrected.pdf", sep="_")
+  
+  # pdf(file=name1)
+  dist <- expnDist(LD_counts, subsetCounts$LD$CR, DEGs[[i]], logCPM = TRUE, BM=TRUE)
+  # dev.off()
+  
+  # pdf(file=name2)
+  dist <- expnDist(LD_batch, subsetCounts$batchCorrected$CR, DEGs[[i]], logCPM = FALSE,BM=TRUE)
+  # dev.off()
+}
+```
+
+
+#For loop to do the plotting. 
+```{r}
+#Input a data frame (here called tmp) with the log2 CPM and the status (eg IF or CR). Patient IDs as rows, genes+status as columns. 
+
+bPlots <- list()
+dPlots <- list()
+for (i in 2:ncol(tmp)-1){
+    # print(i)
+    gene <- colnames(tmp)[i]
+    
+    dtitle <- paste("Density  Plot of ", gene, "Expression in TARGET AML")
+    btitle <- paste("Distribution of ", gene, "Expression in TARGET AML")
+    
+    densityPlot <- ggplot(tmp, aes(x=tmp[,i], fill=Status)) + geom_density(alpha=0.65) + labs(title=dtitle, y="Density", x="Log2 Counts per Million (CPM)") + theme_bw()
+    boxPlot <- ggplot(tmp, aes(x=Status, y=tmp[,i], fill=Status)) + geom_boxplot() + labs(title=btitle, x=" ", y="Log2 Counts per Million (CPM)" ) + theme_bw()
+    
+    print(densityPlot)
+    print(boxPlot)
+    
+    name1 <- gsub("-", "\\.", gene) %>% paste(., "densityPlot", sep="_")
+    name2 <- gsub("-", "\\.", gene) %>% paste(., "boxPlot", sep="_")
+    
+    dPlots[[name1]] <- densityPlot
+    bPlots[[name2]] <- boxPlot
+}
+
+```
+
+#Plot the Distribution of genes of interest
+
+identified PTGIS and CCNA1 as upregulated in IF, not in CR, and no in BM. The others are of interest
+due to literature that states these are possible immune therapy targets, or associate with AML already. 
+```{r}
+#gene of interest GOI
+GOI <- c("PTGIS", "CCNA1", "MYH11", "RUNX1T1", "MSLN", "PRAME")
+```
+
+```{r}
+LD_TPM <- get(load("~/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/TARGET_AML_TPM_withGenesasRowNames_BCCA28Apr2016.RData"))
+```
+
+
+```{r}
+expnDist(LD_counts,subsetCounts$LD$CR,GOI,BM=TRUE,logCPM=TRUE)
+```
+
+
+#Cluster Analysis with Limma DEGs
+
+##phenotype vectors
+```{r}
+phenos <- list(subsetCounts$LD$CR, subsetCounts$LD$CR,subsetCounts$LD$CR, subsetCounts$batchCorrected$CR,  subsetCounts$batchCorrected$CR, subsetCounts$batchCorrected$CR)
+
+length(phenos)
+```
+
+##colors for heatmap color bar
+```{r}
+colors <- list()
+for (i in 1:length(phenos)){
+  color <- ifelse(phenos[[i]] == "IF", "red", "blue2")
+  colors[[i]] <- color
+}
+```
+
+##cluster methods to explore
+```{r}
+methods <- c("ward.D2", "ward.D", "mcquitty", "complete", "average")
+```
+
+
+
+##perform the clustering with 5 different methods.
+
+Input was 6 lists of differentially expressed genes. The first three are from the DE analysis using the raw fractional counts: 1) all 923 DEGs identified 2) 7 genes with abs(log2FC) > 3, and 3) 120 genes with lowest adj.P values. The second set of DEGs are from DE analysis with batch corrected counts as input:  1) all 836 DEGs identified 2) 11 genes with abs(log2FC) > 3, and 3) 138 genes with lowest adj.P values.
+
+```{r}
+for ( i in 1:length(DEGs)){
+  ObjName <- paste("clusterAnalysis", i, sep = "_")
+  print(ObjName)
+  c <- clusterExploration(DEGs[[i]], phenos[[i]], methods)
+  assign(ObjName, c)
+}
+```
+
+##Visualize the denderograms for each gene list and clustering method. 
+```{r}
+for ( i in 1:6){
+  name <- paste("clusterAnalysis", i, sep = "") 
+  ca <- get(name)
+  
+  for (i in 1:5){
+    method <- methods[i]
+    fileName <- paste("TARGET_AML_dendrograms_", name, "_", method,".pdf", sep = "")
+    pdf(file=fileName, height = 4, width = 11)
+    
+    link <- names(ca)[i]
+    customDends(ca[[i]], phenos[[1]], link)
+    
+    dev.off()
+  }
+}
+```
+
+
+#Cluster Analysis with the DESeq2 DEGs
+
+
+```{r}
+deseqCR <- list(LD_IF_vs_CR_DESeq2$Filt_Res, batchCorrected_IF_vs_CR_DESeq2$Filt_Res)
+names(deseqCR) <- c("LD_allDEGs", "Btc_allDEGs")
+lapply(deseqCR, function(x) quantile(x$padj)) #dist of p values
+```
+
+```{r}
+ct <- c("LD", "btc")
+i <- 1
+for ( list in deseqCR){
+  FC <- paste(ct[i], "highFC", sep="_")
+  pVal <- paste(ct[i], "lowP", sep="_")
+  deseqCR[[FC]] <-  list[abs(list$log2FoldChange) > 3, ]
+  deseqCR[[pVal]] <- list[list$padj < 1e-4, ]
+  i <- i + 1
+}
+summary(deseqCR)
+```
+
+```{r}
+sapply(deseqCR, dim)
+```
+
+```{r}
+DEGs <- lapply(deseqCR, rownames) 
+
+summary(DEGs)
+```
+
+```{r message=FALSE,warning=FALSE}
+phenos <- list(subsetCounts$LD$CR,subsetCounts$LD$CR,subsetCounts$LD$CR,subsetCounts$batchCorrected$CR,subsetCounts$batchCorrected$CR,subsetCounts$batchCorrected$CR)
+              
+for ( i in 1:length(DEGs)){
+  ObjName <- paste("clusterAnalysis", i, sep = "_")
+  print(ObjName)
+  
+  c <- clusterExploration(DEGs[[i]], phenos[[i]], methods)
+  assign(ObjName, c)
+  
+  rdata <- paste(ObjName, "DESeq2_10May2017.RData", sep="_")
+  save(c, file=rdata)
+}
+```
+
+```{r}
+names(DEGs)
+```
+
+
+
+##Visualize the denderograms for each gene list and clustering method. 
+```{r message=FALSE,warnin=FALSE}
+for ( i in 1:6){
+  name <- paste("clusterAnalysis", i, sep = "_") 
+  ca <- get(name)
+  
+  genes <- names(DEGs)[i]
+  for (i in 1:5){
+    method <- methods[i]
+    fileName <- paste("TARGET_AML_dendrograms_", name, genes, method,".pdf", sep = "_")
+    print(fileName)
+    
+    pdf(file=fileName, height = 4, width = 11)
+    link <- names(ca)[i]
+    customDends(ca[[i]], phenos[[1]], link)
+    dev.off()
+  }
+}
+```
+
+
+
+

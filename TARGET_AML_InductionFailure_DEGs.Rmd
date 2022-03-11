@@ -1,0 +1,311 @@
+---
+title: "DE of IF Patients in TARGET AML"
+author: "Jenny Smith"
+date: "April 26, 2017"
+output: pdf_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = 'RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(survival)
+library(RColorBrewer)
+library(colorspace)
+library(stringr)
+library(Biobase)
+library(dplyr)
+library(magrittr)
+library(tables)
+library(gtools)
+getwd()
+```
+
+
+```{r}
+source("scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+source("scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Limma_DE_Function.r")
+source("scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/DESEq2_DE_Function.r")
+```
+
+#Define Functions to be used
+
+```{r}
+phenoVectors <- function(groupA, groupB){
+  library(magrittr)
+  #groupA and GroupB are character vectors with the patients IDs in each group
+  g1 <- as.character(substitute(groupA)) %>% { gsub("_IDs", "", . ) }
+  g2 <- as.character(substitute(groupB)) %>% { gsub("_IDs", "", . ) }
+  
+  vector <- c(rep(g1, length(groupA)), rep(g2, length(groupB)))
+  names(vector) <- c(groupA, groupB)
+  
+  return(vector)
+}
+```
+
+
+#high Depth diagnostic Samples
+```{r}
+HD_counts <- get(load("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/Dx_rawcounts_FilteredLowCounts_withGeneSymbol_TARGET_AML_Aug2014.RData"))
+
+dim(HD_counts)
+```
+
+```{r}
+head(HD_counts[,1:5])
+```
+
+
+#low Depth Diagnosic Samples
+```{r}
+LD_counts <- get(load("H:/RNA_seq_Analysis/2017.04.14_TARGET_AML_correlationMSLN/ExpressionData/combatAdjustedExp.RData"))
+LD_counts[which(LD_counts < 0, arr.ind=TRUE)] <- 0
+
+dim(LD_counts)
+```
+
+```{r}
+head(LD_counts[,1:5])
+```
+
+#Read in the Clinical Data
+```{r}
+# clinData <- read.csv("H:/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/TARGET_AML_ClinicalData_current_asof_June30_2016_Progression_Free_Survival.csv ")
+
+clinData <- read.csv("H:/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/TARGET_AML_ClinicalData_current_asof_June30_2016_Progression_Free_Survival_Updated.csv", stringsAsFactors = FALSE)
+
+head(clinData[,1:5])
+```
+
+
+#Define the Groups 
+
+```{r}
+
+```
+
+##Induction Failures
+```{r}
+# IF <- clinData[grepl("Induction Failure, Marrow", clinData$Induction.Status), ]
+IF <- clinData[which(clinData$Group == "A"), ] #Induction Failure, bone marrow
+
+dim(IF) #81
+```
+
+```{r}
+length(which(IF$TARGET.USI %in% colnames(LD_counts))) #40 in RNA-seq LD
+``` 
+
+```{r}
+IF_IDs <- as.vector(IF[which(IF$TARGET.USI %in% colnames(LD_counts)), 1])
+IF_IDs
+```
+
+##Complete Remission, No Relapse
+```{r}
+#remission after course 1 and no relapse
+control <- clinData[which(clinData$Induction.Status == "Remission" & clinData$First.Event == "Censored"), ]
+
+dim(control) #373
+```
+
+```{r}
+length(which(control$TARGET.USI %in% colnames(LD_counts))) #170 in RNA-seq LD
+```
+
+```{r}
+ctrl_IDs <- as.vector(control[which(control$TARGET.USI %in% colnames(LD_counts)), 1])
+
+ctrl_IDs
+```
+
+##Remission with Subsequent Relapse
+```{r}
+#remission after course 1 but relapsed
+relapse <- clinData[which(clinData$Group == "C"), ]
+
+dim(relapse) #245
+```
+
+```{r}
+length(which(relapse$TARGET.USI %in% colnames(LD_counts)))# 81 in RNA-seq data
+```
+
+```{r}
+Rx_IDs <- as.vector(relapse[which(relapse$TARGET.USI %in% colnames(LD_counts)),1])
+
+Rx_IDs
+```
+
+
+#Perform Differential Expression Analysis of IF versus CR+NoRelapse
+
+```{r}
+cmp <- list(ctrl_IDs, Rx_IDs)
+names(cmp) <- c("ctrl", "relapse")
+```
+
+```{r}
+for (i in 1:2){
+  DE <- calcDE(LD_counts[,c(IF_IDs,cmp[[i]])], IF_IDs, cmp[[i]], logCPM = FALSE)
+  name <- names(cmp)[i]
+  fileName <- paste("TARGET_AML_batchCorrected_greaterThan1CPM_IFvs", name, ".csv", sep="")
+  print(fileName)
+  assign(name, DE)
+  # write.csv(DE$DE, fileName)
+}
+```
+
+
+```{r}
+DEGs <- function(expnData, groups, reference){
+  #expndata is a matrix of counts, with patient IDs are colnames, genes as rows
+  #groups is a dataframe with Patient IDs as rownames, and status, eg. pos,neg, etc. 
+  
+  library(DESeq2)
+  
+  expnData <- expnData[,rownames(groups)] #correct order
+  expnData <- as.matrix(round(expnData, digits=0)) #if input is fractional counts
+  
+  # groups <- as.dataframe(groups)
+  
+  dds <- DESeqDataSetFromMatrix(countData = expnData, 
+                                colData = groups, 
+                                design = ~ ctrlStatus)
+  
+  dds$ctrlStatus <- relevel(dds$ctrlStatus, ref=reference)
+  dds <- dds[ rowSums(counts(dds)) > 1, ]
+  
+  
+  # dds <- DESeq(dds)
+  # res <- results(dds)
+  return(dds)
+}
+```
+
+
+```{r}
+head(LD_counts[,names(ctrlStatus)])
+```
+
+```{r}
+t <- DEGs(LD_counts,gg, "IF")
+
+t
+```
+
+
+```{r}
+gg <- as.data.frame(ctrlStatus)
+as.factor(colnames(gg))
+
+```
+
+
+#Heatmaps 
+
+```{r message=FALSE, warning=FALSE}
+ctrlStatus <- phenoVectors(IF_IDs, ctrl_IDs) 
+relapseStatus <- phenoVectors(IF_IDs, Rx_IDs) 
+
+status <- list(ctrlStatus, relapseStatus)
+DEGs <- list(ctrl$DE, relapse$DE)
+```
+
+```{r}
+as.data.frame(ctrlStatus)
+```
+
+
+```{r message=FALSE,warning=FALSE}
+for (i in 1:2){
+  ObjName <- paste(names(cmp)[i], "_dends", sep="")
+  
+  d <- dge_dendrograms(LD_counts, status[[i]],rownames(DEGs[[i]]))
+  
+  print(ObjName)
+  assign(ObjName, d)
+}
+```
+
+
+```{r}
+colors <- list()
+for (i in 1:2){
+  color <- ifelse(status[[i]] == "IF", "red", "blue2")
+  colors[[i]] <- color
+}
+```
+
+
+```{r message=FALSE,warning=FALSE}
+cc <- c(IF="red", ctrl="blue")
+colorDends(ctrl_dends$c1, cc, ctrlStatus, c(0.3,1.5))
+```
+
+
+```{r}
+basicHeatmap(ctrl_dends$TMMCPM, ctrl_dends$c2, ctrl_dends$c1, 210, ctrl_dends$names, colors[[1]] )
+```
+
+
+#MDS Plots
+
+```{r}
+plotMDS(ctrl_dends$TMMCPM, col=colors[[1]], cex=0.5) #TMMCPM is log2 TMMCPM values
+```
+
+
+```{r}
+library(vegan)
+library(MASS)
+```
+
+```{r}
+TMM <- calcDE(LD_counts,"NA", "NA")
+
+dim(TMM)
+```
+
+```{r}
+head(TMM$counts[,1:5])
+```
+
+```{r}
+genesOfInterest <- TMM$counts[rownames(TMM$counts) %in% rownames(DEGs[[1]]), ]
+```
+
+
+```{r}
+d <- dist(t(genesOfInterest))
+
+fit <- isoMDS(d, k=2)
+```
+
+```{r}
+fit$points[1:20,]
+```
+
+```{r}
+stressplot(fit, d)
+```
+
+```{r}
+x <- fit$points[,1]
+y <- fit$points[,2]
+
+plot(x,y, type="n")
+text(x,y, labels = colnames(genesOfInterest), cex=0.5)
+```
+
+
+
+#Prepare for GSEA 
+
+
+

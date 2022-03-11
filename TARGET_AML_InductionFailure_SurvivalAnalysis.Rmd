@@ -1,0 +1,182 @@
+---
+title: "Induction Failure Biomarkers Survival Analysis"
+author: "Jenny Smith"
+date: "May 2, 2017"
+output: pdf_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = 'H:/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/')
+# knitr::opts_knit$set(root.dir = '/home/jlsmith3/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(survival)
+library(RColorBrewer)
+library(colorspace)
+library(stringr)
+library(dplyr)
+library(magrittr)
+library(tables)
+library(gtools)
+getwd()
+```
+
+
+```{r}
+source("H:/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/coxph_Function.r")
+source("H:/scripts/ConversionScripts/Ensembl_ID_Convert_Function.r")
+source("H:/scripts/RNAseq_Analysis/MSLN_waterfallplots/Waterfall_Barplot_Function_2017.05.22.r")
+```
+
+
+#Define Functions to be used
+
+```{r}
+CDE_Expn <- function(clinData,expnData,geneList){
+  #clinData with patient IDs as rownames
+  #expnData with genes as rownames, and patient IDs as colnames
+  expnData <- expnData[match(geneList, rownames(expnData)), ] #subset and order
+  expnData <- as.data.frame(t(expnData)) #patients as rownames now. 
+  
+  #subset clinData for patietns w/RNA-seq 
+  clinData <- clinData[intersect(rownames(expnData), rownames(clinData)),] 
+  
+  #merge the two dataframes
+  df <- merge(clinData, expnData, by.x=0, by.y=0)
+
+  return(df)
+}
+
+```
+
+
+#Expression Data
+```{r}
+HD_counts <- get(load("ExpressionData/TARGET_AML_rawCounts_Dx_FilteredLowCounts_withGeneSymbol_Aug2014.RData"))
+
+LD_counts <- get(load("H:/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/TARGET_AML_FractionalCounts_genesAsRownames_BCCA28Apr2016.RData"))
+
+LD_batch <- get(load("ExpressionData/combatAdjustedExp.RData"))
+LD_batch[which(LD_batch < 0, arr.ind=TRUE)] <- 0
+```
+
+```{r}
+log2 <- log2(LD_batch+1)
+dim(log2)
+```
+
+#Normalized Expression Data
+
+```{r}
+HD <- read.csv("H:/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/ExpressionData/TARGET_AML_TPM_withGeneSymbol_Aug2014.csv")
+
+head(HD)
+```
+
+
+```{r}
+HD_TPM <- convert_Dx_Rx(HD, "ensemblSymbol", "GENEID", subset = "Dx")
+HD_TPM <- HD_TPM[which(!duplicated(HD_TPM$SYMBOL) & ! is.na(HD_TPM$SYMBOL)), ]
+rownames(HD_TPM) <- HD_TPM$SYMBOL
+HD_TPM <- HD_TPM[,-(1:2)]
+colnames(HD_TPM) <- gsub("T.+([A-Z]{6}).+", "\\1", colnames(HD_TPM))
+
+head(HD_TPM)
+```
+
+```{r}
+# save(HD_TPM, file="TARGET_AML_TPM_withGenesasRowNames_Aug2014.RData")
+```
+
+
+```{r}
+LD_TPM <- read.csv("H:/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/ExpressionData/TARGET_AML_TPM_BCCA28Apr2016.csv")
+LD_TPM <- LD_TPM[which(!duplicated(LD_TPM$geneSymbol)), ]
+rownames(LD_TPM) <- LD_TPM$geneSymbol
+LD_TPM <- LD_TPM[,-1]
+
+head(LD_TPM)
+```
+
+```{r}
+# save(LD_TPM, file="TARGET_AML_TPM_withGenesasRowNames_BCCA28Apr2016.RData")
+```
+
+
+#Clinical Data
+
+```{r}
+# clinData <- read.csv("TARGET_AML_ClinicalData_current_asof_June30_2016_Progression_Free_Survival_Updated.csv", stringsAsFactors = FALSE) #missing a bunch of the patients?? 
+
+clinData <- read.csv("H:/reference_mapping-files/TARGET_AML_current_asof_june30_2016_FINAL.csv", stringsAsFactors = FALSE)
+
+rownames(clinData) <- clinData$TARGET.USI
+
+head(clinData[,1:5])
+```
+
+
+#Groups 
+
+```{r}
+phenoVectors <- get(load("H:/RNA_seq_Analysis/2017.04.21_TARGET_AML_IF/PatientGroups_HD_LD_batchCorrected.RData"))
+```
+
+```{r}
+#gene of interest GOI
+GOI <- c("PTGIS", "CCNA1", "MYH11", "RUNX1T1", "MSLN", "PRAME")
+```
+
+```{r}
+TPM <- list(HD_TPM, LD_TPM)
+names(TPM) <- c("HD", "LD")
+```
+
+#Merge the expression with the clinical Data
+```{r}
+CDEs <- lapply(TPM, CDE_Expn, clinData=clinData,geneList=GOI)
+```
+
+
+#Waterfall Plots of the genes of interest. 
+
+```{r}
+HD_plots <- list()
+LD_plots <- list()
+btc_plots <- list()
+for (i in 1:6){
+  p1 <- waterfallPlot(TPM$HD,GOI[i],phenoVectors$HD$CR, "TPM", BM=TRUE)
+  p2 <- waterfallPlot(TPM$LD,GOI[i],phenoVectors$LD$CR, "TPM", BM=TRUE)
+  p3 <- waterfallPlot(as.data.frame(log2),GOI[i],phenoVectors$batchCorrected$CR, "log2ReadCounts",BM=TRUE)
+  
+  p1$labels$title <- paste("Expression of", GOI[i], "in High Depth Sequencing", sep=" ")
+  p2$labels$title <- paste("Expression of", GOI[i], "in Low Depth Sequencing", sep=" ")
+  p3$labels$title <- paste("Expression of", GOI[i], "in Batch Corrected Sequencing", sep=" ")
+  
+  HD_plots[[GOI[i]]] <- p1
+  LD_plots[[GOI[i]]] <- p2
+  btc_plots[[GOI[i]]] <- p3
+  
+  # fileName <- paste("waterFallPlots", GOI[i],"HD_LD_batchCorrected_ImmunoTargets.pdf", sep="_")
+  # pdf(file=fileName)
+  print(p1)
+  print(p2)
+  print(p3)
+  # dev.off()
+}
+#add annotation with the FC and adj.PaValue 
+```
+
+
+#Cox Proportional Hazards with Expression of each gene
+```{r}
+
+```
+
+
+
+
